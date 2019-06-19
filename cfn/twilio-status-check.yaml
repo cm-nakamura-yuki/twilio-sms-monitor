@@ -1,0 +1,117 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Twilio SMS StatusCallback"
+Parameters:
+  SlackWebhook:
+    Type: String
+    Description: "Slack incoming webhook url."
+  PhoneListTableName:
+    Type: String
+    Description: "Store phone numbers which send failed."
+Resources:
+  PhoneListTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+        -
+          AttributeName: "userPhoneNumber"
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: "userPhoneNumber"
+          KeyType: "HASH"
+      BillingMode: "PAY_PER_REQUEST"
+      TableName: !Ref PhoneListTableName
+  CallbackServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: /
+      RoleName: "callback_lambda_role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+        - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+  CallbackFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      FunctionName: "twilio_statuscallback_backend"
+      Description: "Twilio statuscallback backend"
+      Role: !GetAtt "CallbackServiceRole.Arn"
+      Runtime: nodejs10.x
+      MemorySize: 128
+      Timeout: 10
+      Handler: index.handler
+      Environment:
+        Variables:
+          WEBHOOK_URL: !Ref SlackWebhook
+          TABLE_NAME: !Ref PhoneListTableName
+      Code:
+        S3Bucket: "sample-lambda-code-for-blog"
+        S3Key: "twilio-statuscallback.zip"
+  CallbackPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CallbackFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+    DependsOn: CallbackFunction
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: "twilio-statuscallback"
+  ApiResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId:
+        Ref: "RestApi"
+      ParentId:
+        !GetAtt
+          - "RestApi"
+          - "RootResourceId"
+      PathPart: "callback"
+  CallbackMethod:
+    DependsOn: "CallbackPermission"
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId:
+        Ref: "RestApi"
+      ResourceId:
+        Ref: "ApiResource"
+      HttpMethod: "POST"
+      AuthorizationType: "None"
+      Integration:
+        Type: "AWS_PROXY"
+        IntegrationHttpMethod: "POST"
+        Uri: 
+          !Join
+            - ""
+            - - !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/"
+              - !GetAtt CallbackFunction.Arn
+              - "/invocations"
+      MethodResponses:
+        -
+          ResponseModels:
+            application/json: Empty
+          StatusCode: 200
+  CallbackDeployment:
+    DependsOn: "CallbackMethod"
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId:
+        Ref: "RestApi"
+  CallbackStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: prd
+      RestApiId:
+        Ref: "RestApi"
+      DeploymentId:
+        Ref: "CallbackDeployment"
